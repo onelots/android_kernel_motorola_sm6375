@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/module.h>
@@ -36,10 +35,6 @@
 
 /* Mask to enable skew calibration registers */
 #define SKEW_CAL_MASK 0x2
-
-#ifdef CONFIG_MOT_SECURE_CAMERA
-#define QCOM_SCM_EBUSY_MAX_RETRY  5
-#endif
 
 static DEFINE_MUTEX(active_csiphy_cnt_mutex);
 
@@ -398,21 +393,9 @@ int32_t cam_cmd_buf_parser(struct csiphy_device *csiphy_dev,
 		return rc;
 	}
 
-	if (csl_packet->num_cmd_buf)
-		cmd_desc = (struct cam_cmd_buf_desc *)
-			((uint32_t *)&csl_packet->payload +
-			csl_packet->cmd_buf_offset / 4);
-	else {
-		CAM_ERR(CAM_CSIPHY, "num_cmd_buffers = %d", csl_packet->num_cmd_buf);
-		rc = -EINVAL;
-		return rc;
-	}
-
-	rc = cam_packet_util_validate_cmd_desc(cmd_desc);
-	if (rc) {
-		CAM_ERR(CAM_CSIPHY, "Invalid cmd desc ret: %d", rc);
-		return rc;
-	}
+	cmd_desc = (struct cam_cmd_buf_desc *)
+		((uint32_t *)&csl_packet->payload +
+		csl_packet->cmd_buf_offset / 4);
 
 	rc = cam_mem_get_cpu_buf(cmd_desc->mem_handle,
 		&generic_ptr, &len);
@@ -437,7 +420,6 @@ int32_t cam_cmd_buf_parser(struct csiphy_device *csiphy_dev,
 	index = cam_csiphy_get_instance_offset(csiphy_dev, cfg_dev->dev_handle);
 	if (index < 0 || index  >= csiphy_dev->session_max_device_support) {
 		CAM_ERR(CAM_CSIPHY, "index in invalid: %d", index);
-		cam_mem_put_cpu_buf(cmd_desc->mem_handle);
 		return -EINVAL;
 	}
 
@@ -447,7 +429,6 @@ int32_t cam_cmd_buf_parser(struct csiphy_device *csiphy_dev,
 		CAM_ERR(CAM_CSIPHY,
 			"Wrong configuration lane_cnt: %u",
 			cam_cmd_csiphy_info->lane_cnt);
-		cam_mem_put_cpu_buf(cmd_desc->mem_handle);
 		return rc;
 	}
 
@@ -508,14 +489,11 @@ int32_t cam_cmd_buf_parser(struct csiphy_device *csiphy_dev,
 		csiphy_dev->csiphy_info[index].settle_time,
 		csiphy_dev->csiphy_info[index].data_rate);
 
-	cam_mem_put_cpu_buf(cmd_desc->mem_handle);
-	cam_mem_put_cpu_buf(cfg_dev->packet_handle);
 	return rc;
 
 reset_settings:
 	cam_csiphy_reset_phyconfig_param(csiphy_dev, index);
-	cam_mem_put_cpu_buf(cfg_dev->packet_handle);
-	cam_mem_put_cpu_buf(cmd_desc->mem_handle);
+
 	return rc;
 }
 
@@ -1101,10 +1079,6 @@ int32_t cam_csiphy_core_cfg(void *phy_dev,
 	struct cam_control   *cmd = (struct cam_control *)arg;
 	int32_t              rc = 0;
 
-#ifdef CONFIG_MOT_SECURE_CAMERA
-	int32_t              retry_count = 0;
-#endif
-
 	if (!csiphy_dev || !cmd) {
 		CAM_ERR(CAM_CSIPHY, "Invalid input args");
 		return -EINVAL;
@@ -1208,12 +1182,6 @@ int32_t cam_csiphy_core_cfg(void *phy_dev,
 		index = csiphy_dev->acquire_count;
 		csiphy_acq_dev.device_handle =
 			cam_create_device_hdl(&bridge_params);
-		if (csiphy_acq_dev.device_handle <= 0) {
-			rc = -EFAULT;
-			CAM_ERR(CAM_CSIPHY, "Can not create device handle");
-			goto release_mutex;
-		}
-
 		csiphy_dev->csiphy_info[index].hdl_data.device_hdl =
 			csiphy_acq_dev.device_handle;
 		csiphy_dev->csiphy_info[index].hdl_data.session_hdl =
@@ -1301,7 +1269,7 @@ int32_t cam_csiphy_core_cfg(void *phy_dev,
 			cam_csiphy_update_lane(csiphy_dev, offset, false);
 			goto release_mutex;
 		}
-#ifndef CONFIG_MOT_SECURE_CAMERA
+
 		if (csiphy_dev->csiphy_info[offset].secure_mode)
 			cam_csiphy_notify_secure_mode(
 				csiphy_dev,
@@ -1309,28 +1277,6 @@ int32_t cam_csiphy_core_cfg(void *phy_dev,
 
 		csiphy_dev->csiphy_info[offset].secure_mode =
 			CAM_SECURE_MODE_NON_SECURE;
-#else
-		retry_count = 0;
-retry_a:
-		retry_count++;
-
-		if (csiphy_dev->csiphy_info[offset].secure_mode) {
-			rc = cam_csiphy_notify_secure_mode(
-				csiphy_dev,
-				CAM_SECURE_MODE_NON_SECURE, offset);
-			if (rc <0 && retry_count <= QCOM_SCM_EBUSY_MAX_RETRY) {
-				CAM_INFO(CAM_CSIPHY, "CAM_STOP_PHYDEV: scm call with count: %d,",retry_count);
-				goto retry_a;
-			} else if (rc <0 && retry_count > QCOM_SCM_EBUSY_MAX_RETRY){
-				CAM_INFO(CAM_CSIPHY, "CAM_STOP_PHYDEV: notify secure mode finally failed scm call with count: %d,",retry_count);
-			}
-
-		}
-
-		csiphy_dev->csiphy_info[offset].secure_mode =
-			CAM_SECURE_MODE_NON_SECURE;
-
-#endif
 
 		csiphy_dev->csiphy_info[offset].csiphy_cpas_cp_reg_mask = 0x0;
 
@@ -1386,7 +1332,6 @@ retry_a:
 			goto release_mutex;
 		}
 
-#ifndef CONFIG_MOT_SECURE_CAMERA
 		if (csiphy_dev->csiphy_info[offset].secure_mode)
 			cam_csiphy_notify_secure_mode(
 				csiphy_dev,
@@ -1394,26 +1339,6 @@ retry_a:
 
 		csiphy_dev->csiphy_info[offset].secure_mode =
 			CAM_SECURE_MODE_NON_SECURE;
-#else
-		retry_count = 0;
-retry_b:
-		retry_count++;
-
-		if (csiphy_dev->csiphy_info[offset].secure_mode) {
-			rc = cam_csiphy_notify_secure_mode(
-				csiphy_dev,
-				CAM_SECURE_MODE_NON_SECURE, offset);
-			if (rc <0 && retry_count <= QCOM_SCM_EBUSY_MAX_RETRY) {
-				CAM_INFO(CAM_CSIPHY, "CAM_RELEASE_PHYDEV: scm call with count: %d,",retry_count);
-				goto retry_b;
-			} else if (rc <0 && retry_count > QCOM_SCM_EBUSY_MAX_RETRY){
-				CAM_INFO(CAM_CSIPHY, "CAM_RELEASE_PHYDEV: notify secure mode finally failed scm call with count: %d,",retry_count);
-			}
-		}
-
-		csiphy_dev->csiphy_info[offset].secure_mode =
-			CAM_SECURE_MODE_NON_SECURE;
-#endif
 
 		csiphy_dev->csiphy_cpas_cp_reg_mask[offset] = 0x0;
 
